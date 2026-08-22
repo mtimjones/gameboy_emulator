@@ -1,6 +1,7 @@
 // CPU emulator
 
 #include <stdint.h>
+#include "common.h"
 
 typedef struct {
     union {
@@ -43,8 +44,6 @@ typedef struct {
 #define FLAG_N  0x40  /* Subtract */
 #define FLAG_H  0x20  /* Half carry */
 #define FLAG_C  0x10  /* Carry */
-
-#define bool_t unsigned char
 
 typedef struct
 {

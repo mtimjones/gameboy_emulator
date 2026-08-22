@@ -1,4 +1,8 @@
 // memory.c
+#include "common.h"
+#include "assert.h"
+
+extern void gb_tick(unsigned int);
 
 #define ROM_bank_0         0x0000
 #define ROM_bank_s         0x4000
@@ -15,9 +19,10 @@
 
 static unsigned char memory[0x10000];
 static unsigned char int_en_reg;
+static bool_t rom_boot_enabled = true;
 
 // dmg_boot.bin
-static unsigned char internal_rom[256] = {
+static unsigned char internal_boot_rom[256] = {
 /* 0000 */  0x31, 0xfe, 0xff, 0xaf, 0x21, 0xff, 0x9f, 0x32, 0xcb, 0x7c, 0x20, 0xfb, 0x21, 0x26, 0xff, 0x0e,
 /* 0010 */  0x11, 0x3e, 0x80, 0x32, 0xe2, 0x0c, 0x3e, 0xf3, 0xe2, 0x32, 0x3e, 0x77, 0x77, 0x3e, 0xfc, 0xe0,
 /* 0020 */  0x47, 0x11, 0x04, 0x01, 0x21, 0x10, 0x80, 0x1a, 0xcd, 0x95, 0x00, 0xcd, 0x96, 0x00, 0x13, 0x7b,
@@ -41,9 +46,26 @@ void memory_init(void)
     rom_boot_enabled = 1;
 }
 
+void handle_io_port(unsigned short address, unsigned char value)
+{
+    switch(address)
+    {
+        // Boot ROM Mapping Control
+        case 0xFF50:
+            if (value != 0) {
+                memory[address] = value;
+                rom_boot_enabled = 0;
+            }
+            break;
+    }
+
+    gb_tick(4);
+}
+
 // Hardware address space access.
 unsigned char bus_read8(unsigned short address)
 {
+    gb_tick(4);
     if (address < RAM_bank_i_echo) {
         // ROM_Bank_0, ROM_Bank_s, Video_RAM, RAM_Bank_i
         if (rom_boot_enabled && (address < 256))
@@ -66,7 +88,6 @@ unsigned char bus_read8(unsigned short address)
     } else {
         assert(0);
     }
-    gb_tick(4);
 }
 
 // Hardware address space access.
@@ -97,21 +118,5 @@ void bus_write8(unsigned short address, unsigned char value)
     } else {
         assert(0);
     }
-    gb_tick(4);
-}
-
-void handle_io_port(unsigned short address, unsigned char value)
-{
-
-    switch(address)
-    {
-        // Boot ROM Mapping Control
-        case 0xFF50:
-            if (value != 0) {
-                memory[address] = value;
-                rom_boot_enabled = 0;
-            }
-            break;
-
     gb_tick(4);
 }

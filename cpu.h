@@ -67,3 +67,6 @@ typedef struct
     bool_t ime_pending;
     bool_t ime;
 } CPU_t;
+
+void cpu_init();
+void gb_run();

@@ -3,6 +3,7 @@
 #include "memory.h"
 #include "common.h"
 #include "assert.h"
+#include "stdio.h"
 
 CPU_t cpu;
 
@@ -43,9 +44,10 @@ void cpu_write8(uint16_t address, uint8_t value)
 // CPU operation that uses the bus and consumes CPU cycles. 
 uint8_t cpu_fetch8() 
 { 
-    uint8_t value = cpu_read8(cpu.registers.PC); 
+    uint8_t opcode = cpu_read8(cpu.registers.PC); 
+    printf("PC: %x opcode %x\n", cpu.registers.PC, opcode);
     cpu.registers.PC++; 
-    return value; 
+    return opcode; 
 } 
 
 void cpu_idle() 
@@ -71,19 +73,34 @@ void cpu_step()
     { 
         gb_tick(4); 
         //cpu_check_interrupts(); 
-    } 
+    }
+    else
+    {
+        uint8_t opcode = cpu_fetch8(); 
+        opcode_table[opcode](); 
+        //cpu_check_interrupts(); 
 
-    uint8_t opcode = cpu_fetch8(); 
-    opcode_table[opcode](); 
-    //cpu_check_interrupts(); 
-
-    cpu_update_ime(); 
+        cpu_update_ime(); 
+    }
 } 
+
+void debug()
+{
+    printf("-------------------------------\n");
+    printf("AF = %02x\n", cpu.registers.AF);
+    printf("BC = %02x\n", cpu.registers.BC);
+    printf("DE = %02x\n", cpu.registers.DE);
+    printf("HL = %02x\n", cpu.registers.HL);
+    printf("PC = %02x\n", cpu.registers.PC);
+    printf("SP = %02x\n", cpu.registers.SP);
+}
 
 void gb_run() 
 { 
+    cpu.running = true;
     while(cpu.running) 
     { 
+        debug();
         cpu_step(); 
     } 
 } 
@@ -404,6 +421,29 @@ static inline uint8_t cpu_rrc8(uint8_t value)
     return result; 
 } 
 
+static inline void cpu_rst(uint16_t vector)
+{
+    cpu_idle();  /* internal M-cycle */
+
+    cpu.registers.SP--;
+    cpu_write8(cpu.registers.SP, (cpu.registers.PC >> 8) & 0xFF);
+
+    cpu.registers.SP--;
+    cpu_write8(cpu.registers.SP, cpu.registers.PC & 0xFF);
+
+    cpu.registers.PC = vector;
+}
+
+static inline void cpu_bit(uint8_t value, uint8_t bit)
+{
+    uint8_t carry = cpu.registers.F & FLAG_C;
+
+    cpu.registers.F = carry | FLAG_H;
+
+    if ((value & (1u << bit)) == 0)
+        cpu.registers.F |= FLAG_Z;
+}
+
 static void op_00() 
 { 
     // NOP 
@@ -509,6 +549,7 @@ static void op_0F()
 // TBD 
 static void op_10() 
 { 
+    assert(0);
 } 
 
 static void op_11() 
@@ -559,6 +600,7 @@ static void op_17()
 
 static void op_18()
 {
+    assert(0);
 
 }
 
@@ -608,7 +650,12 @@ static void op_1F()
 
 static void op_20()
 {
+    int8_t offset = cpu_fetch8();
 
+    if (!(cpu.registers.F & FLAG_Z)) {
+        cpu.registers.PC = (uint16_t)(cpu.registers.PC + offset);
+        cpu_idle();
+    }
 }
 
 static void op_21() 
@@ -693,6 +740,7 @@ void op_27()
 
 static void op_28()
 {
+    assert(0);
 
 }
 
@@ -732,6 +780,7 @@ static void op_2E()
 
 static void op_2F()
 {
+    assert(0);
 
 }
 
@@ -775,6 +824,7 @@ static void op_35()
 
 static void op_36()
 {
+    assert(0);
 
 }
 
@@ -786,6 +836,7 @@ static void op_37()
 
 static void op_38()
 {
+    assert(0);
 
 }
 
@@ -915,6 +966,7 @@ static void op_4E()
 static void op_4F()
 {
 
+    assert(0);
 }
 
 static void op_50() 
@@ -1110,6 +1162,7 @@ static void op_75()
 static void op_76() 
 { 
     // TBD 
+    assert(0);
 } 
 
 static void op_77() 
@@ -1483,31 +1536,37 @@ static void op_BE()
 
 static void op_BF()
 {
+    assert(0);
 
 }
 
 static void op_C0()
 {
+    assert(0);
 
 }
 
 static void op_C1()
 {
+    assert(0);
 
 }
 
 static void op_C2()
 {
+    assert(0);
 
 }
 
 static void op_C3()
 {
+    assert(0);
 
 }
 
 static void op_C4()
 {
+    assert(0);
 
 }
 
@@ -1530,21 +1589,24 @@ static void op_C6()
 
 static void op_C7()
 {
-
+    cpu_rst(0x0000);
 }
 
 static void op_C8()
 {
+    assert(0);
 
 }
 
 static void op_C9()
 {
+    assert(0);
 
 }
 
 static void op_CA()
 {
+    assert(0);
 
 }
 
@@ -1671,7 +1733,14 @@ static void op_CB()
             result = cpu_rl8(value);
             bus_write8(cpu.registers.HL, result);
             break;
+        case 0x7C:
+            cpu_bit(cpu.registers.H, 7);
+            break;
+        case 0x7D:
+            cpu_bit(cpu.registers.L, 7);
+            break;
         default:
+            printf("subcode = %x\n", subcode);
             assert(0);
             break;
     }
@@ -1679,11 +1748,12 @@ static void op_CB()
 
 static void op_CC()
 {
-
+    assert(0);
 }
 
 static void op_CD()
 {
+    assert(0);
 
 }
 
@@ -1695,11 +1765,12 @@ static void op_CE()
 
 static void op_CF()
 {
-
+    cpu_rst(0x0008);
 }
 
 static void op_D0()
 {
+    assert(0);
 
 }
 
@@ -1713,21 +1784,25 @@ static void op_D1()
 
 static void op_D2()
 {
+    assert(0);
 
 }
 
 static void op_D3()
 {
+    assert(0);
 
 }
 
 static void op_D4()
 {
+    assert(0);
 
 }
 
 static void op_D5()
 {
+    assert(0);
 
 }
 
@@ -1739,36 +1814,42 @@ static void op_D6()
 
 static void op_D7()
 {
-
+    cpu_rst(0x0010);
 }
 
 static void op_D8()
 {
+    assert(0);
 
 }
 
 static void op_D9()
 {
+    assert(0);
 
 }
 
 static void op_DA()
 {
+    assert(0);
 
 }
 
 static void op_DB()
 {
+    assert(0);
 
 }
 
 static void op_DC()
 {
+    assert(0);
 
 }
 
 static void op_DD()
 {
+    assert(0);
 
 }
 
@@ -1780,7 +1861,7 @@ static void op_DE()
 
 static void op_DF()
 {
-
+    cpu_rst(0x0018);
 }
 
 static void op_E0()
@@ -1805,11 +1886,13 @@ static void op_E2()
 
 static void op_E3()
 {
+    assert(0);
 
 }
 
 static void op_E4()
 {
+    assert(0);
 
 }
 
@@ -1832,7 +1915,7 @@ static void op_E6()
 
 static void op_E7()
 {
-
+    cpu_rst(0x0020);
 }
 
 static void op_E8()
@@ -1851,6 +1934,7 @@ static void op_E8()
 
 static void op_E9()
 {
+    assert(0);
 
 }
 
@@ -1864,27 +1948,31 @@ static void op_EA()
 
 static void op_EB()
 {
+    assert(0);
 
 }
 
 static void op_EC()
 {
+    assert(0);
 
 }
 
 static void op_ED()
 {
+    assert(0);
 
 }
 
 static void op_EE()
 {
+    assert(0);
 
 }
 
 static void op_EF()
 {
-
+    cpu_rst(0x0028);
 }
 
 static void op_F0()
@@ -1915,6 +2003,7 @@ static void op_F3()
 
 static void op_F4()
 {
+    assert(0);
 
 }
 
@@ -1937,7 +2026,7 @@ static void op_F6()
 
 static void op_F7()
 {
-
+    cpu_rst(0x0030);
 }
 
 static void op_F8()
@@ -1953,6 +2042,7 @@ static void op_F8()
 
 static void op_F9()
 {
+    assert(0);
 
 }
 
@@ -1971,11 +2061,13 @@ void op_FB()
 
 void op_FC()
 {
+    assert(0);
 
 }
 
 void op_FD()
 {
+    assert(0);
 
 }
 
@@ -1987,7 +2079,7 @@ static void op_FE()
 
 static void op_FF()
 {
-
+    cpu_rst(0x0038);
 }
 
 OpcodeHandler opcode_table[] = {

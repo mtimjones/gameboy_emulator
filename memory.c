@@ -1,4 +1,5 @@
 // memory.c
+#include <stdio.h>
 #include "common.h"
 #include "assert.h"
 
@@ -116,6 +117,7 @@ void bus_write8(unsigned short address, unsigned char value)
         // INT_EN_REG
         int_en_reg = value;
     } else {
+        printf("Address %x value %x\n", address, value);
         assert(0);
     }
     gb_tick(4);

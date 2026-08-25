@@ -619,6 +619,16 @@ static inline void cpu_jp_cond(bool_t condition)
     }
 }
 
+static inline void cpu_jr_cond(bool_t condition)
+{
+    int8_t offset = (int8_t)cpu_fetch8();
+
+    if (condition) {
+        cpu.registers.PC = (uint16_t)(cpu.registers.PC + offset);
+        cpu_idle();
+    }
+}
+
 static void op_00() 
 { 
     // NOP 
@@ -773,10 +783,13 @@ static void op_17()
     cpu.registers.F = new_carry ? FLAG_C : 0; 
 } 
 
-static void op_18()
+void op_18()
 {
-    assert(0);
+    int8_t offset = (int8_t)cpu_fetch8();
 
+    cpu.registers.PC = (uint16_t)(cpu.registers.PC + offset);
+
+    cpu_idle();
 }
 
 static void op_19() 
@@ -823,14 +836,10 @@ static void op_1F()
     cpu.registers.F = new_carry ? FLAG_C : 0; 
 } 
 
-static void op_20()
+/* 20: JR NZ,n */
+void op_20()
 {
-    int8_t offset = cpu_fetch8();
-
-    if (!(cpu.registers.F & FLAG_Z)) {
-        cpu.registers.PC = (uint16_t)(cpu.registers.PC + offset);
-        cpu_idle();
-    }
+    cpu_jr_cond(!(cpu.registers.F & FLAG_Z));
 }
 
 static void op_21() 
@@ -913,10 +922,10 @@ void op_27()
     } 
 } 
 
-static void op_28()
+/* 28: JR Z,n */
+void op_28()
 {
-    assert(0);
-
+    cpu_jr_cond(cpu.registers.F & FLAG_Z);
 }
 
 static void op_29() 
@@ -959,11 +968,11 @@ static void op_2F()
 
 }
 
-static void op_30() 
-{ 
-    cpu.registers.A = ~cpu.registers.A; 
-    cpu.registers.F |= FLAG_N | FLAG_H; 
-} 
+/* 30: JR NC,n */
+void op_30()
+{
+    cpu_jr_cond(!(cpu.registers.F & FLAG_C));
+}
 
 static void op_31() 
 { 
@@ -1009,10 +1018,10 @@ static void op_37()
     cpu.registers.F = (cpu.registers.F & FLAG_Z) | FLAG_C; 
 } 
 
-static void op_38()
+/* 38: JR C,n */
+void op_38()
 {
-    assert(0);
-
+    cpu_jr_cond(cpu.registers.F & FLAG_C);
 }
 
 static void op_39() 
@@ -2057,10 +2066,21 @@ static void op_CC()
     assert(0);
 }
 
-static void op_CD()
+void op_CD()
 {
-    assert(0);
+    uint16_t addr = cpu_fetch16();
 
+    /* Internal M-cycle */
+    cpu_idle();
+
+    /* Push return address: high byte first, then low byte */
+    cpu.registers.SP--;
+    cpu_write8(cpu.registers.SP, (cpu.registers.PC >> 8) & 0xFF);
+
+    cpu.registers.SP--;
+    cpu_write8(cpu.registers.SP, cpu.registers.PC & 0xFF);
+
+    cpu.registers.PC = addr;
 }
 
 static void op_CE()
@@ -2240,8 +2260,7 @@ static void op_E8()
 
 static void op_E9()
 {
-    assert(0);
-
+    cpu.registers.PC = cpu.registers.HL;
 }
 
 static void op_EA()

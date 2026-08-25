@@ -444,6 +444,181 @@ static inline void cpu_bit(uint8_t value, uint8_t bit)
         cpu.registers.F |= FLAG_Z;
 }
 
+static inline uint8_t cpu_rr8(uint8_t value)
+{
+    uint8_t old_carry = (cpu.registers.F & FLAG_C) ? 1 : 0;
+    uint8_t new_carry = value & 0x01;
+
+    uint8_t result = (value >> 1) | (old_carry << 7);
+
+    cpu.registers.F = 0;
+
+    if (result == 0)
+        cpu.registers.F |= FLAG_Z;
+
+    if (new_carry)
+        cpu.registers.F |= FLAG_C;
+
+    return result;
+}
+
+static inline uint8_t cpu_sla8(uint8_t value)
+{
+    uint8_t carry = (value >> 7) & 0x01;
+    uint8_t result = value << 1;
+
+    cpu.registers.F = 0;
+
+    if (result == 0)
+        cpu.registers.F |= FLAG_Z;
+
+    if (carry)
+        cpu.registers.F |= FLAG_C;
+
+    return result;
+}
+
+static inline uint8_t cpu_sra8(uint8_t value)
+{
+    uint8_t carry = value & 0x01;
+    uint8_t result = (value >> 1) | (value & 0x80);
+
+    cpu.registers.F = 0;
+
+    if (result == 0)
+        cpu.registers.F |= FLAG_Z;
+
+    if (carry)
+        cpu.registers.F |= FLAG_C;
+
+    return result;
+}
+
+static inline uint8_t cpu_srl8(uint8_t value)
+{
+    uint8_t carry = value & 0x01;
+    uint8_t result = value >> 1;
+
+    cpu.registers.F = 0;
+
+    if (result == 0)
+        cpu.registers.F |= FLAG_Z;
+
+    if (carry)
+        cpu.registers.F |= FLAG_C;
+
+    return result;
+}
+
+void op_cb_bit(uint8_t opcode)
+{
+    uint8_t bit = (opcode >> 3) & 0x07;
+    uint8_t reg = opcode & 0x07;
+
+    uint8_t value;
+
+    switch (reg) {
+    case 0: value = cpu.registers.B; break;
+    case 1: value = cpu.registers.C; break;
+    case 2: value = cpu.registers.D; break;
+    case 3: value = cpu.registers.E; break;
+    case 4: value = cpu.registers.H; break;
+    case 5: value = cpu.registers.L; break;
+    case 6: value = cpu_read8(cpu.registers.HL); break;
+    case 7: value = cpu.registers.A; break;
+    default:
+        return;
+    }
+
+    cpu_bit(value, bit);
+}
+
+static inline uint8_t cpu_set_bit(uint8_t value, uint8_t bit)
+{
+    return value | (1u << bit);
+}
+
+static inline uint8_t cpu_res_bit(uint8_t value, uint8_t bit)
+{
+    return value & ~(1u << bit);
+}
+
+void op_cb_set(uint8_t opcode)
+{
+    uint8_t bit = (opcode >> 3) & 0x07;
+    uint8_t reg = opcode & 0x07;
+
+    switch (reg) {
+    case 0:
+        cpu.registers.B = cpu_set_bit(cpu.registers.B, bit); break;
+    case 1:
+        cpu.registers.C = cpu_set_bit(cpu.registers.C, bit); break;
+    case 2:
+        cpu.registers.D = cpu_set_bit(cpu.registers.D, bit); break;
+    case 3:
+        cpu.registers.E = cpu_set_bit(cpu.registers.E, bit); break;
+    case 4:
+        cpu.registers.H = cpu_set_bit(cpu.registers.H, bit); break;
+    case 5:
+        cpu.registers.L = cpu_set_bit(cpu.registers.L, bit); break;
+    case 6: {
+        uint8_t value = cpu_read8(cpu.registers.HL);
+        value = cpu_set_bit(value, bit);
+        cpu_write8(cpu.registers.HL, value);
+        break;
+    }
+    case 7:
+        cpu.registers.A = cpu_set_bit(cpu.registers.A, bit); break;
+    }
+}
+
+void op_cb_res(uint8_t opcode)
+{
+    uint8_t bit = (opcode >> 3) & 0x07;
+    uint8_t reg = opcode & 0x07;
+
+    switch (reg) {
+    case 0:
+        cpu.registers.B = cpu_res_bit(cpu.registers.B, bit); break;
+    case 1:
+        cpu.registers.C = cpu_res_bit(cpu.registers.C, bit); break;
+    case 2:
+        cpu.registers.D = cpu_res_bit(cpu.registers.D, bit); break;
+    case 3:
+        cpu.registers.E = cpu_res_bit(cpu.registers.E, bit); break;
+    case 4:
+        cpu.registers.H = cpu_res_bit(cpu.registers.H, bit); break;
+    case 5:
+        cpu.registers.L = cpu_res_bit(cpu.registers.L, bit); break;
+    case 6: {
+        uint8_t value = cpu_read8(cpu.registers.HL);
+        value = cpu_res_bit(value, bit);
+        cpu_write8(cpu.registers.HL, value);
+        break;
+    }
+    case 7:
+        cpu.registers.A = cpu_res_bit(cpu.registers.A, bit); break;
+    }
+}
+
+static inline uint16_t cpu_fetch16()
+{
+    uint8_t lo = cpu_fetch8();
+    uint8_t hi = cpu_fetch8();
+
+    return ((uint16_t)hi << 8) | lo;
+}
+
+static inline void cpu_jp_cond(bool_t condition)
+{
+    uint16_t addr = cpu_fetch16();
+
+    if (condition) {
+        cpu_idle();
+        cpu.registers.PC = addr;
+    }
+}
+
 static void op_00() 
 { 
     // NOP 
@@ -1552,16 +1727,22 @@ static void op_C1()
 
 }
 
+/* C2: JP NZ,nn */
 static void op_C2()
 {
-    assert(0);
-
+    cpu_jp_cond(!(cpu.registers.F & FLAG_Z));
 }
 
-static void op_C3()
+void op_C3()
 {
-    assert(0);
+    uint8_t lo = cpu_fetch8();
+    uint8_t hi = cpu_fetch8();
 
+    uint16_t addr = ((uint16_t)hi << 8) | lo;
+
+    cpu_idle();
+
+    cpu.registers.PC = addr;
 }
 
 static void op_C4()
@@ -1604,10 +1785,10 @@ static void op_C9()
 
 }
 
-static void op_CA()
+/* CA: JP Z,nn */
+void op_CA()
 {
-    assert(0);
-
+    cpu_jp_cond(cpu.registers.F & FLAG_Z);
 }
 
 static void op_CB() 
@@ -1616,34 +1797,31 @@ static void op_CB()
     uint8_t value, result; 
     switch(subcode) 
     { 
+        case 0x08:
+            cpu.registers.B = cpu_rrc8(cpu.registers.B);
+            break;
+        case 0x09:
+            cpu.registers.C = cpu_rrc8(cpu.registers.C);
+            break;
+        case 0x0A:
+            cpu.registers.D = cpu_rrc8(cpu.registers.D);
+            break;
+        case 0x0B:
+            cpu.registers.E = cpu_rrc8(cpu.registers.E);
+            break;
+        case 0x0C:
+            cpu.registers.H = cpu_rrc8(cpu.registers.H);
+            break;
+        case 0x0D:
+            cpu.registers.L = cpu_rrc8(cpu.registers.L);
+            break;
         case 0x0E: 
             value = bus_read8(cpu.registers.HL); 
             result = cpu_rrc8(value); 
             bus_write8(cpu.registers.HL, result); 
             break;
-        case 0x0D:
-            cpu.registers.L = cpu_rrc8(cpu.registers.L);
-            break;
-        case 0x0C:
-            cpu.registers.H = cpu_rrc8(cpu.registers.H);
-            break;
-        case 0x0B:
-            cpu.registers.E = cpu_rrc8(cpu.registers.E);
-            break;
-        case 0x0A:
-            cpu.registers.D = cpu_rrc8(cpu.registers.D);
-            break;
-        case 0x09:
-            cpu.registers.C = cpu_rrc8(cpu.registers.C);
-            break;
-        case 0x08:
-            cpu.registers.B = cpu_rrc8(cpu.registers.B);
-            break;
         case 0x0f:
             cpu.registers.A = cpu_rrc8(cpu.registers.A);
-            break;
-        case 0x37:
-            cpu.registers.A = cpu_swap8(cpu.registers.A);
             break;
         case 0x30:
             cpu.registers.B = cpu_swap8(cpu.registers.B);
@@ -1665,6 +1843,9 @@ static void op_CB()
             break;
         case 0x36:
             bus_write8(cpu.registers.HL,(cpu_swap8(bus_read8(cpu.registers.HL))));
+            break;
+        case 0x37:
+            cpu.registers.A = cpu_swap8(cpu.registers.A);
             break;
         case 0x07:
             // RLC A
@@ -1733,11 +1914,136 @@ static void op_CB()
             result = cpu_rl8(value);
             bus_write8(cpu.registers.HL, result);
             break;
-        case 0x7C:
-            cpu_bit(cpu.registers.H, 7);
+        case 0x1F:
+            cpu.registers.A = cpu_rr8(cpu.registers.A);
             break;
-        case 0x7D:
-            cpu_bit(cpu.registers.L, 7);
+        case 0x18:
+            cpu.registers.B = cpu_rr8(cpu.registers.B);
+            break;
+        case 0x19:
+            cpu.registers.C = cpu_rr8(cpu.registers.C);
+            break;
+        case 0x1A:
+            cpu.registers.D = cpu_rr8(cpu.registers.D);
+            break;
+        case 0x1B:
+            cpu.registers.E = cpu_rr8(cpu.registers.E);
+            break;
+        case 0x1C:
+            cpu.registers.H = cpu_rr8(cpu.registers.H);
+            break;
+        case 0x1D:
+            cpu.registers.L = cpu_rr8(cpu.registers.L);
+            break;
+        case 0x1E:
+            value = bus_read8(cpu.registers.HL);
+            result = cpu_rr8(value);
+            bus_write8(cpu.registers.HL, result);
+            break;
+        case 0x27:
+            cpu.registers.A = cpu_sla8(cpu.registers.A);
+            break;
+        case 0x20:
+            cpu.registers.B = cpu_sla8(cpu.registers.B);
+            break;
+        case 0x21:
+            cpu.registers.C = cpu_sla8(cpu.registers.C);
+            break;
+        case 0x22:
+            cpu.registers.D = cpu_sla8(cpu.registers.D);
+            break;
+        case 0x23:
+            cpu.registers.E = cpu_sla8(cpu.registers.E);
+            break;
+        case 0x24:
+            cpu.registers.H = cpu_sla8(cpu.registers.H);
+            break;
+        case 0x25:
+            cpu.registers.L = cpu_sla8(cpu.registers.L);
+            break;
+        case 0x26:
+            value = bus_read8(cpu.registers.HL);
+            bus_write8(cpu.registers.HL, cpu_sla8(cpu.registers.A));
+            break;
+        case 0x2F:
+            cpu.registers.A = cpu_sra8(cpu.registers.A);
+            break;
+        case 0x28:
+            cpu.registers.B = cpu_sra8(cpu.registers.B);
+            break;
+        case 0x29:
+            cpu.registers.C = cpu_sra8(cpu.registers.C);
+            break;
+        case 0x2A:
+            cpu.registers.D = cpu_sra8(cpu.registers.D);
+            break;
+        case 0x2B:
+            cpu.registers.E = cpu_sra8(cpu.registers.E);
+            break;
+        case 0x2C:
+            cpu.registers.H = cpu_sra8(cpu.registers.H);
+            break;
+        case 0x2D:
+            cpu.registers.L = cpu_sra8(cpu.registers.L);
+            break;
+        case 0x2E:
+            value = bus_read8(cpu.registers.HL);
+            bus_write8(cpu.registers.HL, cpu_sra8(value));
+            break;
+        case 0x3F:
+            cpu.registers.A = cpu_srl8(cpu.registers.A);
+            break;
+        case 0x38:
+            cpu.registers.B = cpu_srl8(cpu.registers.B);
+            break;
+        case 0x39:
+            cpu.registers.C = cpu_srl8(cpu.registers.C);
+            break;
+        case 0x3A:
+            cpu.registers.D = cpu_srl8(cpu.registers.D);
+            break;
+        case 0x3B:
+            cpu.registers.E = cpu_srl8(cpu.registers.E);
+            break;
+        case 0x3C:
+            cpu.registers.H = cpu_srl8(cpu.registers.H);
+            break;
+        case 0x3D:
+            cpu.registers.L = cpu_srl8(cpu.registers.L);
+            break;
+        case 0x3E:
+            value = bus_read8(cpu.registers.HL);
+            bus_write8(cpu.registers.HL, cpu_srl8(value));
+            break;
+        case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
+        case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+        case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
+        case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+        case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67:
+        case 0x68: case 0x69: case 0x6A: case 0x6B: case 0x6C: case 0x6D: case 0x6E: case 0x6F:
+        case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
+        case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F:
+            op_cb_bit(subcode);
+            break;
+        case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85: case 0x86: case 0x87:
+        case 0x88: case 0x89: case 0x8A: case 0x8B: case 0x8C: case 0x8D: case 0x8E: case 0x8F:
+        case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
+        case 0x98: case 0x99: case 0x9A: case 0x9B: case 0x9C: case 0x9D: case 0x9E: case 0x9F:
+        case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: case 0xA6: case 0xA7:
+        case 0xA8: case 0xA9: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+        case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7:
+        case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+            op_cb_res(subcode);
+            break;
+        case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: case 0xC5: case 0xC6: case 0xC7:
+        case 0xC8: case 0xC9: case 0xCA: case 0xCB: case 0xCC: case 0xCD: case 0xCE: case 0xCF:
+        case 0xD0: case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xD6: case 0xD7:
+        case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+        case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE4: case 0xE5: case 0xE6: case 0xE7:
+        case 0xE8: case 0xE9: case 0xEA: case 0xEB: case 0xEC: case 0xED: case 0xEE: case 0xEF:
+        case 0xF0: case 0xF1: case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6: case 0xF7:
+        case 0xF8: case 0xF9: case 0xFA: case 0xFB: case 0xFC: case 0xFD: case 0xFE: case 0xFF:
+            op_cb_set(subcode);
             break;
         default:
             printf("subcode = %x\n", subcode);
@@ -1782,10 +2088,10 @@ static void op_D1()
     cpu.registers.SP++;
 }
 
+/* D2: JP NC,nn */
 static void op_D2()
 {
-    assert(0);
-
+    cpu_jp_cond(!(cpu.registers.F & FLAG_C));
 }
 
 static void op_D3()
@@ -1829,10 +2135,10 @@ static void op_D9()
 
 }
 
+/* DA: JP C,nn */
 static void op_DA()
 {
-    assert(0);
-
+    cpu_jp_cond(cpu.registers.F & FLAG_C);
 }
 
 static void op_DB()

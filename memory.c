@@ -1,8 +1,11 @@
 // memory.c
 #include <stdio.h>
 #include <stdint.h>
+#include "cpu.h"
+#include "input.h"
 #include "common.h"
 #include "assert.h"
+#include "ppu.h"
 
 extern void gb_tick(unsigned int);
 
@@ -69,6 +72,11 @@ void memory_init(void)
     timer.reload_delay = 0;
 }
 
+unsigned char memory_peek8(unsigned short address)
+{
+    return memory[address];
+}
+
 unsigned char interrupt_flags_read(void)
 {
     return int_flag_reg;
@@ -103,6 +111,225 @@ static uint16_t timer_period(void)
         case 2: return 64;
         case 3: return 256;
         default: return 1024;
+    }
+}
+
+static bool_t dma_bus_locked(unsigned short address)
+{
+    if (!cpu.dma.active)
+        return false;
+
+    return !(address >= 0xFF80 && address < 0xFFFF) && address != INT_EN_REG;
+}
+
+static void handle_io_port(unsigned short address, unsigned char value);
+static void dma_start(unsigned char value);
+
+static unsigned char bus_read8_core(unsigned short address, bool_t bypass_dma_lock)
+{
+    if (!bypass_dma_lock && dma_bus_locked(address))
+        return 0xFF;
+
+    if (!bypass_dma_lock && address >= 0x8000 && address < 0xA000 && ppu_vram_locked())
+        return 0xFF;
+
+    if (!bypass_dma_lock && address >= 0xFE00 && address < 0xFEA0 && ppu_oam_locked())
+        return 0xFF;
+
+    if (address < 0x4000) {
+        if (rom_boot_enabled && (address < 256))
+        {
+            return internal_boot_rom[address];
+        }
+        return memory[address];
+    } else if (address < 0x8000) {
+        return memory[address];
+    } else if (address < 0xA000) {
+        return memory[address];
+    } else if (address < 0xC000) {
+        return memory[address];
+    } else if (address < 0xE000) {
+        return memory[address];
+    } else if (address < 0xFE00) {
+        return memory[address - 0x2000];
+    } else if (address < 0xFEA0) {
+        return memory[address];
+    } else if (address < 0xFF00) {
+        return 0xFF;
+    } else if (address < 0xFF4C) {
+        switch (address)
+        {
+            case 0xFF40:
+            case 0xFF41:
+            case 0xFF42:
+            case 0xFF43:
+            case 0xFF44:
+            case 0xFF45:
+            case 0xFF47:
+            case 0xFF48:
+            case 0xFF49:
+            case 0xFF4A:
+            case 0xFF4B:
+                return ppu_read_reg(address);
+            case 0xFF00: return input_read_ff00();
+            case 0xFF04: return (unsigned char)(timer.div_counter >> 8);
+            case 0xFF05: return timer.tima;
+            case 0xFF06: return timer.tma;
+            case 0xFF07: return timer.tac | 0xF8;
+            case 0xFF0F: return int_flag_reg | 0xE0;
+            default: return memory[address];
+        }
+    } else if (address < 0xFF80) {
+        return 0xFF;
+    } else if (address < 0xFFFF) {
+        return memory[address];
+    } else if (address == INT_EN_REG) {
+        return int_en_reg;
+    }
+
+    assert(0);
+    return 0xFF;
+}
+
+static void bus_write8_core(unsigned short address, unsigned char value, bool_t bypass_dma_lock)
+{
+    if (!bypass_dma_lock && dma_bus_locked(address))
+        return;
+
+    if (!bypass_dma_lock && address >= 0x8000 && address < 0xA000 && ppu_vram_locked())
+        return;
+
+    if (!bypass_dma_lock && address >= 0xFE00 && address < 0xFEA0 && ppu_oam_locked())
+        return;
+
+    if (address < 0x8000) {
+        // ROM area, ignored without MBC support
+    } else if (address < 0xA000) {
+        // VRAM
+        memory[address] = value;
+    } else if (address < 0xC000) {
+        // Cartridge RAM
+        memory[address] = value;
+    } else if (address < 0xE000) {
+        // Work RAM
+        memory[address] = value;
+    } else if (address < 0xFE00) {
+        // Echo of work RAM
+        memory[address] = value;
+        memory[address - 0x2000] = value;
+    } else if (address < 0xFEA0) {
+        // OAM
+        if (!cpu.dma.active)
+        {
+            memory[address] = value;
+        }
+    } else if (address < 0xFF00) {
+        // Unusable area
+    } else if (address < 0xFF4C) {
+        // IO ports
+        switch (address)
+        {
+            case 0xFF40:
+            case 0xFF41:
+            case 0xFF42:
+            case 0xFF43:
+            case 0xFF45:
+            case 0xFF47:
+            case 0xFF48:
+            case 0xFF49:
+            case 0xFF4A:
+            case 0xFF4B:
+                ppu_write_reg(address, value);
+                break;
+            case 0xFF00:
+                input_write_ff00(value);
+                memory[address] = input_read_ff00();
+                break;
+            case 0xFF04:
+                timer.div_counter = 0;
+                memory[address] = 0;
+                break;
+            case 0xFF05:
+                timer.tima = value;
+                memory[address] = value;
+                break;
+            case 0xFF06:
+                timer.tma = value;
+                memory[address] = value;
+                break;
+            case 0xFF07:
+                timer.tac = value & 0x07;
+                timer.tima_counter %= timer_period();
+                memory[address] = timer.tac | 0xF8;
+                break;
+            case 0xFF0F:
+                interrupt_flags_write(value);
+                memory[address] = int_flag_reg;
+                break;
+            case 0xFF46:
+                memory[address] = value;
+                dma_start(value);
+                break;
+            case 0xFF50:
+                if (value != 0) {
+                    memory[address] = value;
+                    rom_boot_enabled = 0;
+                }
+                break;
+            default:
+                handle_io_port(address, value);
+                break;
+        }
+    } else if (address < 0xFF80) {
+        // Unusable area
+    } else if (address < 0xFFFF) {
+        // High RAM
+        memory[address] = value;
+    } else if (address == INT_EN_REG) {
+        // Interrupt enable register
+        int_en_reg = value;
+    } else {
+        printf("Address %x value %x\n", address, value);
+        assert(0);
+    }
+}
+
+static void dma_start(unsigned char value)
+{
+    cpu.dma.active = true;
+    cpu.dma.source = (uint16_t)value << 8;
+    cpu.dma.index = 0;
+    cpu.dma.cycle = 0;
+}
+
+void dma_tick(unsigned int cycles)
+{
+    if (!cpu.dma.active)
+    {
+        return;
+    }
+
+    for (unsigned int i = 0; i < cycles && cpu.dma.active; i++)
+    {
+        cpu.dma.cycle++;
+
+        if (cpu.dma.cycle < 4)
+        {
+            continue;
+        }
+
+        cpu.dma.cycle = 0;
+
+        if (cpu.dma.index < 0x00A0)
+        {
+            memory[0xFE00 + cpu.dma.index] = bus_read8_core((unsigned short)(cpu.dma.source + cpu.dma.index), true);
+            cpu.dma.index++;
+        }
+
+        if (cpu.dma.index >= 0x00A0)
+        {
+            cpu.dma.active = false;
+        }
     }
 }
 
@@ -143,37 +370,13 @@ void timer_tick(unsigned int cycles)
     }
 }
 
-void handle_io_port(unsigned short address, unsigned char value)
+static void handle_io_port(unsigned short address, unsigned char value)
 {
     switch(address)
     {
-        case 0xFF04:
-            timer.div_counter = 0;
-            memory[address] = 0;
-            break;
-        case 0xFF05:
-            timer.tima = value;
+        case 0xFF46:
             memory[address] = value;
-            break;
-        case 0xFF06:
-            timer.tma = value;
-            memory[address] = value;
-            break;
-        case 0xFF07:
-            timer.tac = value & 0x07;
-            timer.tima_counter %= timer_period();
-            memory[address] = timer.tac | 0xF8;
-            break;
-        case 0xFF0F:
-            interrupt_flags_write(value);
-            memory[address] = int_flag_reg;
-            break;
-        // Boot ROM Mapping Control
-        case 0xFF50:
-            if (value != 0) {
-                memory[address] = value;
-                rom_boot_enabled = 0;
-            }
+            dma_start(value);
             break;
     }
 }
@@ -181,105 +384,14 @@ void handle_io_port(unsigned short address, unsigned char value)
 // Hardware address space access.
 unsigned char bus_read8(unsigned short address)
 {
-    if (address < 0x4000) {
-        // ROM bank 0
-        if (rom_boot_enabled && (address < 256))
-        {
-            return internal_boot_rom[address];
-        }
-        return memory[address];
-    } else if (address < 0x8000) {
-        // Switchable ROM bank
-        return memory[address];
-    } else if (address < 0xA000) {
-        // VRAM
-        return memory[address];
-    } else if (address < 0xC000) {
-        // Cartridge RAM
-        return memory[address];
-    } else if (address < 0xE000) {
-        // Work RAM
-        return memory[address];
-    } else if (address < 0xFE00) {
-        // Echo of work RAM
-        return memory[address - 0x2000];
-    } else if (address < 0xFEA0) {
-        // Sprite attribute table (OAM)
-        return memory[address];
-    } else if (address < 0xFF00) {
-        // Unusable area
-        return 0xFF;
-    } else if (address < 0xFF4C) {
-        // IO ports
-        switch (address)
-        {
-            case 0xFF04: return (unsigned char)(timer.div_counter >> 8);
-            case 0xFF05: return timer.tima;
-            case 0xFF06: return timer.tma;
-            case 0xFF07: return timer.tac | 0xF8;
-            case 0xFF0F: return int_flag_reg | 0xE0;
-            default: return memory[address];
-        }
-    } else if (address < 0xFF80) {
-        // Unusable area
-        return 0xFF;
-    } else if (address < 0xFFFF) {
-        // High RAM
-        return memory[address];
-    } else if (address == INT_EN_REG) {
-        // Interrupt enable register
-        return int_en_reg;
-    } else {
-        assert(0);
-    }
+    unsigned char value = bus_read8_core(address, false);
     gb_tick(4);
+    return value;
 }
 
 // Hardware address space access.
 void bus_write8(unsigned short address, unsigned char value)
 {
-    if (address < 0x8000) {
-        // ROM area, ignored without MBC support
-    } else if (address < 0xA000) {
-        // VRAM
-        memory[address] = value;
-    } else if (address < 0xC000) {
-        // Cartridge RAM
-        memory[address] = value;
-    } else if (address < 0xE000) {
-        // Work RAM
-        memory[address] = value;
-    } else if (address < 0xFE00) {
-        // Echo of work RAM
-        memory[address] = value;
-        memory[address - 0x2000] = value;
-    } else if (address < 0xFEA0) {
-        // OAM
-        memory[address] = value;
-    } else if (address < 0xFF00) {
-        // Unusable area
-    } else if (address < 0xFF4C) {
-        // IO ports
-        handle_io_port(address, value);
-        if (address == 0xFF04)
-        {
-            memory[address] = 0;
-        }
-        else if (address == 0xFF0F)
-        {
-            memory[address] = int_flag_reg;
-        }
-    } else if (address < 0xFF80) {
-        // Unusable area
-    } else if (address < 0xFFFF) {
-        // High RAM
-        memory[address] = value;
-    } else if (address == INT_EN_REG) {
-        // Interrupt enable register
-        int_en_reg = value;
-    } else {
-        printf("Address %x value %x\n", address, value);
-        assert(0);
-    }
+    bus_write8_core(address, value, false);
     gb_tick(4);
 }

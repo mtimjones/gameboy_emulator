@@ -68,5 +68,7 @@ typedef struct
     bool_t ime;
 } CPU_t;
 
+extern CPU_t cpu;
+
 void cpu_init();
 void gb_run();

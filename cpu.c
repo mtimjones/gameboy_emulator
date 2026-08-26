@@ -1,6 +1,8 @@
 // CPU emulator
 #include "cpu.h"
 #include "memory.h"
+#include "ppu.h"
+#include "viewer.h"
 #include "common.h"
 #include "assert.h"
 #include "stdio.h"
@@ -9,6 +11,11 @@
 CPU_t cpu;
 
 typedef void (*OpcodeHandler)(void);
+
+static inline bool_t cpu_addr_in_hram(uint16_t address)
+{
+    return address >= 0xFF80 && address < 0xFFFF;
+}
 
 void cpu_init(void)
 {
@@ -19,6 +26,10 @@ void cpu_init(void)
     cpu.ime_delay = 0;
     cpu.ime_pending = 0;
     cpu.ime = 0;
+    cpu.dma.active = 0;
+    cpu.dma.source = 0;
+    cpu.dma.index = 0;
+    cpu.dma.cycle = 0;
 
 }
 
@@ -27,8 +38,8 @@ void gb_tick(unsigned int cycles)
     for (unsigned int i = 0 ; i < cycles; i++)
     {
         timer_tick(1);
-        //ppu_tick(1); // Picture Processing Unit
-        //dma_tick(1); 
+        dma_tick(1);
+        ppu_tick(1);
         cpu.tcycles++; 
     } 
 } 
@@ -49,7 +60,6 @@ void cpu_write8(uint16_t address, uint8_t value)
 uint8_t cpu_fetch8() 
 { 
     uint8_t opcode = cpu_read8(cpu.registers.PC); 
-    printf("%x: %2x\n", cpu.registers.PC, opcode);
     cpu.registers.PC++; 
     return opcode; 
 } 
@@ -127,6 +137,11 @@ static inline void cpu_call_cond(bool_t condition, uint16_t addr)
 
 static bool_t cpu_check_interrupts(void)
 {
+    if (cpu.dma.active)
+    {
+        return false;
+    }
+
     uint8_t pending = interrupt_enable_read() & interrupt_flags_read() & 0x1F;
 
     if (pending == 0)
@@ -176,22 +191,23 @@ void cpu_step()
 { 
     extern OpcodeHandler opcode_table[];
 
-    if (cpu_check_interrupts())
+    if (cpu.dma.active && !cpu_addr_in_hram(cpu.registers.PC))
     {
+        gb_tick(4);
         return;
     }
+
+    if (cpu_check_interrupts())
+        return;
 
     if (cpu.halted || cpu.stopped)
     { 
         gb_tick(4); 
-        //cpu_check_interrupts(); 
     }
     else
     {
         uint8_t opcode = cpu_fetch8(); 
         opcode_table[opcode](); 
-        //cpu_check_interrupts(); 
-
         cpu_update_ime(); 
     }
 } 
@@ -220,11 +236,23 @@ void gb_run()
     cpu.running = true;
     while(cpu.running)
     { 
+        if (!viewer_pump())
+        {
+            cpu.running = 0;
+            break;
+        }
+
         uint64_t frame_cycles = cpu.tcycles;
 
         while (cpu.running && (cpu.tcycles - frame_cycles) < cycles_per_frame)
         {
             cpu_step();
+        }
+
+        if (ppu_frame_ready())
+        {
+            viewer_present();
+            ppu_clear_frame_ready();
         }
 
         LARGE_INTEGER now;
@@ -1155,7 +1183,7 @@ static void op_31()
 
 static void op_32() 
 { 
-    bus_write8(cpu.registers.HL, cpu.registers.A); 
+    bus_write8(cpu.registers.HL, cpu.registers.A);
     cpu.registers.HL = cpu.registers.HL - 1; 
 } 
 

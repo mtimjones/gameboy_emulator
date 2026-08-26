@@ -1,5 +1,6 @@
 // memory.c
 #include <stdio.h>
+#include <stdint.h>
 #include "common.h"
 #include "assert.h"
 
@@ -20,7 +21,20 @@ extern void gb_tick(unsigned int);
 
 static unsigned char memory[0x10000];
 static unsigned char int_en_reg;
+static unsigned char int_flag_reg;
 static bool_t rom_boot_enabled = true;
+
+typedef struct
+{
+    uint16_t div_counter;
+    uint16_t tima_counter;
+    uint8_t tima;
+    uint8_t tma;
+    uint8_t tac;
+    uint8_t reload_delay;
+} Timer_t;
+
+static Timer_t timer;
 
 // dmg_boot.bin
 static unsigned char internal_boot_rom[256] = {
@@ -45,12 +59,115 @@ static unsigned char internal_boot_rom[256] = {
 void memory_init(void)
 {
     rom_boot_enabled = 1;
+    int_en_reg = 0;
+    int_flag_reg = 0;
+    timer.div_counter = 0;
+    timer.tima_counter = 0;
+    timer.tima = 0;
+    timer.tma = 0;
+    timer.tac = 0;
+    timer.reload_delay = 0;
+}
+
+unsigned char interrupt_flags_read(void)
+{
+    return int_flag_reg;
+}
+
+void interrupt_flags_write(unsigned char value)
+{
+    int_flag_reg = value | 0xE0;
+}
+
+unsigned char interrupt_enable_read(void)
+{
+    return int_en_reg;
+}
+
+void interrupt_enable_write(unsigned char value)
+{
+    int_en_reg = value;
+}
+
+void interrupt_request(unsigned char mask)
+{
+    int_flag_reg |= (mask & 0x1F);
+}
+
+static uint16_t timer_period(void)
+{
+    switch (timer.tac & 0x03)
+    {
+        case 0: return 1024;
+        case 1: return 16;
+        case 2: return 64;
+        case 3: return 256;
+        default: return 1024;
+    }
+}
+
+void timer_tick(unsigned int cycles)
+{
+    for (unsigned int i = 0; i < cycles; i++)
+    {
+        timer.div_counter++;
+
+        if (timer.reload_delay)
+        {
+            timer.reload_delay--;
+            if (timer.reload_delay == 0)
+            {
+                timer.tima = timer.tma;
+                interrupt_request(0x04);
+            }
+            continue;
+        }
+
+        if ((timer.tac & 0x04) == 0)
+            continue;
+
+        timer.tima_counter++;
+        if (timer.tima_counter >= timer_period())
+        {
+            timer.tima_counter = 0;
+            if (timer.tima == 0xFF)
+            {
+                timer.tima = 0x00;
+                timer.reload_delay = 4;
+            }
+            else
+            {
+                timer.tima++;
+            }
+        }
+    }
 }
 
 void handle_io_port(unsigned short address, unsigned char value)
 {
     switch(address)
     {
+        case 0xFF04:
+            timer.div_counter = 0;
+            memory[address] = 0;
+            break;
+        case 0xFF05:
+            timer.tima = value;
+            memory[address] = value;
+            break;
+        case 0xFF06:
+            timer.tma = value;
+            memory[address] = value;
+            break;
+        case 0xFF07:
+            timer.tac = value & 0x07;
+            timer.tima_counter %= timer_period();
+            memory[address] = timer.tac | 0xF8;
+            break;
+        case 0xFF0F:
+            interrupt_flags_write(value);
+            memory[address] = int_flag_reg;
+            break;
         // Boot ROM Mapping Control
         case 0xFF50:
             if (value != 0) {
@@ -59,62 +176,106 @@ void handle_io_port(unsigned short address, unsigned char value)
             }
             break;
     }
-
-    gb_tick(4);
 }
 
 // Hardware address space access.
 unsigned char bus_read8(unsigned short address)
 {
-    gb_tick(4);
-    if (address < RAM_bank_i_echo) {
-        // ROM_Bank_0, ROM_Bank_s, Video_RAM, RAM_Bank_i
+    if (address < 0x4000) {
+        // ROM bank 0
         if (rom_boot_enabled && (address < 256))
         {
             return internal_boot_rom[address];
         }
         return memory[address];
-    } else if (address >= RAM_bank_i_echo && address < Sprite_Att_RAM) {
-        // RAM_Bank_i
-        return memory[address - 0x2000]; // Echo of RAM_Bank_i
-    } else if (address >= IO_Ports && address <= Unusable_2) {
-        // IO_Ports
+    } else if (address < 0x8000) {
+        // Switchable ROM bank
         return memory[address];
-    } else if (address >= Unusable_2 && address < INT_EN_REG) {
-        // Internal_RAM
+    } else if (address < 0xA000) {
+        // VRAM
+        return memory[address];
+    } else if (address < 0xC000) {
+        // Cartridge RAM
+        return memory[address];
+    } else if (address < 0xE000) {
+        // Work RAM
+        return memory[address];
+    } else if (address < 0xFE00) {
+        // Echo of work RAM
+        return memory[address - 0x2000];
+    } else if (address < 0xFEA0) {
+        // Sprite attribute table (OAM)
+        return memory[address];
+    } else if (address < 0xFF00) {
+        // Unusable area
+        return 0xFF;
+    } else if (address < 0xFF4C) {
+        // IO ports
+        switch (address)
+        {
+            case 0xFF04: return (unsigned char)(timer.div_counter >> 8);
+            case 0xFF05: return timer.tima;
+            case 0xFF06: return timer.tma;
+            case 0xFF07: return timer.tac | 0xF8;
+            case 0xFF0F: return int_flag_reg | 0xE0;
+            default: return memory[address];
+        }
+    } else if (address < 0xFF80) {
+        // Unusable area
+        return 0xFF;
+    } else if (address < 0xFFFF) {
+        // High RAM
         return memory[address];
     } else if (address == INT_EN_REG) {
-        // INT_EN_REG
+        // Interrupt enable register
         return int_en_reg;
     } else {
         assert(0);
     }
+    gb_tick(4);
 }
 
 // Hardware address space access.
 void bus_write8(unsigned short address, unsigned char value)
 {
-    if (address >= Video_RAM && address < RAM_bank_s) {
-        // Video_RAM
+    if (address < 0x8000) {
+        // ROM area, ignored without MBC support
+    } else if (address < 0xA000) {
+        // VRAM
         memory[address] = value;
-    } else if (address >= RAM_bank_s && address < Internal_RAM) {
+    } else if (address < 0xC000) {
+        // Cartridge RAM
         memory[address] = value;
-    } else if (address >= Internal_RAM && address < RAM_bank_i_echo) {
-        memory[address] = value; // Echo of RAM_Bank_i
-        memory[address + 0x2000] = value;
-    } else if (address >= RAM_bank_i_echo && address < Sprite_Att_RAM) {
+    } else if (address < 0xE000) {
+        // Work RAM
+        memory[address] = value;
+    } else if (address < 0xFE00) {
+        // Echo of work RAM
         memory[address] = value;
         memory[address - 0x2000] = value;
-    } else if (address >= Sprite_Att_RAM && address < Unusable_1) {
+    } else if (address < 0xFEA0) {
+        // OAM
         memory[address] = value;
-    } else if (address >= IO_Ports && address < Unusable_2) {
-        // IO_Ports
+    } else if (address < 0xFF00) {
+        // Unusable area
+    } else if (address < 0xFF4C) {
+        // IO ports
         handle_io_port(address, value);
-    } else if (address >= Internal_RAM && address < INT_EN_REG) {
-        // Internal_RAM
+        if (address == 0xFF04)
+        {
+            memory[address] = 0;
+        }
+        else if (address == 0xFF0F)
+        {
+            memory[address] = int_flag_reg;
+        }
+    } else if (address < 0xFF80) {
+        // Unusable area
+    } else if (address < 0xFFFF) {
+        // High RAM
         memory[address] = value;
     } else if (address == INT_EN_REG) {
-        // INT_EN_REG
+        // Interrupt enable register
         int_en_reg = value;
     } else {
         printf("Address %x value %x\n", address, value);

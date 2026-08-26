@@ -4,6 +4,7 @@
 #include "common.h"
 #include "assert.h"
 #include "stdio.h"
+#include <windows.h>
 
 CPU_t cpu;
 
@@ -12,6 +13,12 @@ typedef void (*OpcodeHandler)(void);
 void cpu_init(void)
 {
     cpu.tcycles = 0;
+    cpu.running = 0;
+    cpu.halted = 0;
+    cpu.stopped = 0;
+    cpu.ime_delay = 0;
+    cpu.ime_pending = 0;
+    cpu.ime = 0;
 
 }
 
@@ -19,7 +26,7 @@ void gb_tick(unsigned int cycles)
 {
     for (unsigned int i = 0 ; i < cycles; i++)
     {
-        //timer_tick(1);
+        timer_tick(1);
         //ppu_tick(1); // Picture Processing Unit
         //dma_tick(1); 
         cpu.tcycles++; 
@@ -29,23 +36,20 @@ void gb_tick(unsigned int cycles)
 // CPU operation that uses the bus and consumes CPU cycles. 
 uint8_t cpu_read8(uint16_t address) 
 { 
-    uint8_t value = bus_read8(address); 
-    gb_tick(4); 
-    return value; 
+    return bus_read8(address);
 } 
 
 // CPU operation that uses the bus and consumes CPU cycles. 
 void cpu_write8(uint16_t address, uint8_t value) 
 { 
     bus_write8(address, value); 
-    gb_tick(4); 
 } 
 
 // CPU operation that uses the bus and consumes CPU cycles. 
 uint8_t cpu_fetch8() 
 { 
     uint8_t opcode = cpu_read8(cpu.registers.PC); 
-    printf("PC: %x opcode %x\n", cpu.registers.PC, opcode);
+    printf("%x: %2x\n", cpu.registers.PC, opcode);
     cpu.registers.PC++; 
     return opcode; 
 } 
@@ -65,11 +69,119 @@ static void cpu_update_ime()
     } 
 } 
 
+static inline void cpu_push8(uint8_t value)
+{
+    cpu.registers.SP--;
+    cpu_write8(cpu.registers.SP, value);
+}
+
+static inline uint8_t cpu_pop8(void)
+{
+    uint8_t value = cpu_read8(cpu.registers.SP);
+    cpu.registers.SP++;
+    return value;
+}
+
+static inline void cpu_call(uint16_t addr)
+{
+    cpu_idle();  /* internal M-cycle */
+
+    cpu_push8((cpu.registers.PC >> 8) & 0xFF);
+    cpu_push8(cpu.registers.PC & 0xFF);
+
+    cpu.registers.PC = addr;
+}
+
+static inline void cpu_ret(void)
+{
+    cpu_idle();  /* internal M-cycle */
+
+    uint8_t lo = cpu_pop8();
+    uint8_t hi = cpu_pop8();
+
+    cpu.registers.PC = ((uint16_t)hi << 8) | lo;
+}
+
+static inline void cpu_ret_cond(bool_t condition)
+{
+    if (condition) {
+        cpu_idle();  /* internal M-cycle */
+
+        uint8_t lo = cpu_pop8();
+        uint8_t hi = cpu_pop8();
+
+        cpu.registers.PC = ((uint16_t)hi << 8) | lo;
+
+        cpu_idle();  /* final internal M-cycle */
+    } else {
+        cpu_idle();
+    }
+}
+
+static inline void cpu_call_cond(bool_t condition, uint16_t addr)
+{
+    if (condition) {
+        cpu_call(addr);
+    }
+}
+
+static bool_t cpu_check_interrupts(void)
+{
+    uint8_t pending = interrupt_enable_read() & interrupt_flags_read() & 0x1F;
+
+    if (pending == 0)
+    {
+        return false;
+    }
+
+    if (cpu.halted || cpu.stopped)
+    {
+        cpu.halted = 0;
+        cpu.stopped = 0;
+
+        if (!cpu.ime)
+        {
+            return true;
+        }
+    }
+
+    if (!cpu.ime)
+    {
+        return false;
+    }
+
+    static const uint8_t masks[5] = { 0x01, 0x02, 0x04, 0x08, 0x10 };
+    static const uint16_t vectors[5] = { 0x40, 0x48, 0x50, 0x58, 0x60 };
+
+    for (unsigned int i = 0; i < 5; i++)
+    {
+        if (pending & masks[i])
+        {
+            interrupt_flags_write(interrupt_flags_read() & (uint8_t)~masks[i]);
+            cpu.ime = 0;
+            cpu.ime_pending = 0;
+
+            cpu_idle();
+            cpu_push8((cpu.registers.PC >> 8) & 0xFF);
+            cpu_push8(cpu.registers.PC & 0xFF);
+            cpu.registers.PC = vectors[i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void cpu_step() 
 { 
     extern OpcodeHandler opcode_table[];
 
-    if (cpu.halted) 
+    if (cpu_check_interrupts())
+    {
+        return;
+    }
+
+    if (cpu.halted || cpu.stopped)
     { 
         gb_tick(4); 
         //cpu_check_interrupts(); 
@@ -97,32 +209,46 @@ void debug()
 
 void gb_run() 
 { 
+    const uint64_t cycles_per_frame = 70224;
+    const double cpu_hz = 4194304.0;
+    LARGE_INTEGER perf_freq;
+    LARGE_INTEGER frame_start;
+
+    QueryPerformanceFrequency(&perf_freq);
+    QueryPerformanceCounter(&frame_start);
+
     cpu.running = true;
-    while(cpu.running) 
+    while(cpu.running)
     { 
-        debug();
-        cpu_step(); 
+        uint64_t frame_cycles = cpu.tcycles;
+
+        while (cpu.running && (cpu.tcycles - frame_cycles) < cycles_per_frame)
+        {
+            cpu_step();
+        }
+
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+
+        double elapsed = (double)(now.QuadPart - frame_start.QuadPart) / (double)perf_freq.QuadPart;
+        double target = (double)cycles_per_frame / cpu_hz;
+
+        if (elapsed < target)
+        {
+            DWORD sleep_ms = (DWORD)((target - elapsed) * 1000.0);
+            if (sleep_ms > 0)
+            {
+                Sleep(sleep_ms);
+            }
+            else
+            {
+                Sleep(0);
+            }
+        }
+
+        QueryPerformanceCounter(&frame_start);
     } 
 } 
-
-#if 0 
-static inline uint8_t flags_add_sp_e8(uint16_t sp, uint8_t imm) 
-{ 
-    uint8_t flags = 0; 
-
-    if ((sp & 0x0F) + (imm & 0x0F) > 0x0F) 
-    { 
-        flags |= FLAG_H; 
-    } 
-
-    if ((sp & 0xFF) + imm > 0xFF) 
-    { 
-        flags |= FLAG_C; 
-    } 
-
-    return flags; 
-} 
-#endif 
 
 static inline uint8_t cpu_add8(uint8_t lhs, uint8_t rhs) 
 { 
@@ -131,13 +257,19 @@ static inline uint8_t cpu_add8(uint8_t lhs, uint8_t rhs)
     cpu.registers.F = 0; 
 
     if ((uint8_t)result == 0) 
+    {
         cpu.registers.F |= FLAG_Z; 
+    }
 
     if (((lhs & 0x0F) + (rhs & 0x0F)) > 0x0F) 
+    {
         cpu.registers.F |= FLAG_H; 
+    }
 
     if (result > 0xFF) 
+    {
         cpu.registers.F |= FLAG_C; 
+    }
 
     return (uint8_t)result; 
 } 
@@ -150,13 +282,19 @@ static inline uint8_t cpu_adc8(uint8_t lhs, uint8_t rhs)
     cpu.registers.F = 0; 
 
     if ((uint8_t)result == 0) 
+    {
         cpu.registers.F |= FLAG_Z; 
+    }
 
     if (((lhs & 0x0F) + (rhs & 0x0F) + carry) > 0x0F) 
+    {
         cpu.registers.F |= FLAG_H; 
+    }
 
     if (result > 0xFF) 
+    {
         cpu.registers.F |= FLAG_C; 
+    }
 
     return (uint8_t)result; 
 } 
@@ -413,10 +551,14 @@ static inline uint8_t cpu_rrc8(uint8_t value)
     cpu.registers.F = 0; 
 
     if (result == 0) 
+    {
         cpu.registers.F |= FLAG_Z; 
+    }
 
     if (carry) 
+    {
         cpu.registers.F |= FLAG_C; 
+    }
 
     return result; 
 } 
@@ -441,7 +583,9 @@ static inline void cpu_bit(uint8_t value, uint8_t bit)
     cpu.registers.F = carry | FLAG_H;
 
     if ((value & (1u << bit)) == 0)
+    {
         cpu.registers.F |= FLAG_Z;
+    }
 }
 
 static inline uint8_t cpu_rr8(uint8_t value)
@@ -454,10 +598,14 @@ static inline uint8_t cpu_rr8(uint8_t value)
     cpu.registers.F = 0;
 
     if (result == 0)
+    {
         cpu.registers.F |= FLAG_Z;
+    }
 
     if (new_carry)
+    {
         cpu.registers.F |= FLAG_C;
+    }
 
     return result;
 }
@@ -470,10 +618,14 @@ static inline uint8_t cpu_sla8(uint8_t value)
     cpu.registers.F = 0;
 
     if (result == 0)
+    {
         cpu.registers.F |= FLAG_Z;
+    }
 
     if (carry)
+    {
         cpu.registers.F |= FLAG_C;
+    }
 
     return result;
 }
@@ -486,10 +638,14 @@ static inline uint8_t cpu_sra8(uint8_t value)
     cpu.registers.F = 0;
 
     if (result == 0)
+    {
         cpu.registers.F |= FLAG_Z;
+    }
 
     if (carry)
+    {
         cpu.registers.F |= FLAG_C;
+    }
 
     return result;
 }
@@ -502,10 +658,14 @@ static inline uint8_t cpu_srl8(uint8_t value)
     cpu.registers.F = 0;
 
     if (result == 0)
+    {
         cpu.registers.F |= FLAG_Z;
+    }
 
     if (carry)
+    {
         cpu.registers.F |= FLAG_C;
+    }
 
     return result;
 }
@@ -518,16 +678,24 @@ void op_cb_bit(uint8_t opcode)
     uint8_t value;
 
     switch (reg) {
-    case 0: value = cpu.registers.B; break;
-    case 1: value = cpu.registers.C; break;
-    case 2: value = cpu.registers.D; break;
-    case 3: value = cpu.registers.E; break;
-    case 4: value = cpu.registers.H; break;
-    case 5: value = cpu.registers.L; break;
-    case 6: value = cpu_read8(cpu.registers.HL); break;
-    case 7: value = cpu.registers.A; break;
-    default:
-        return;
+        case 0:
+            value = cpu.registers.B; break;
+        case 1:
+            value = cpu.registers.C; break;
+        case 2:
+            value = cpu.registers.D; break;
+        case 3:
+            value = cpu.registers.E; break;
+        case 4:
+            value = cpu.registers.H; break;
+        case 5:
+            value = cpu.registers.L; break;
+        case 6:
+            value = cpu_read8(cpu.registers.HL); break;
+        case 7:
+            value = cpu.registers.A; break;
+        default:
+            return;
     }
 
     cpu_bit(value, bit);
@@ -577,27 +745,28 @@ void op_cb_res(uint8_t opcode)
     uint8_t bit = (opcode >> 3) & 0x07;
     uint8_t reg = opcode & 0x07;
 
-    switch (reg) {
-    case 0:
-        cpu.registers.B = cpu_res_bit(cpu.registers.B, bit); break;
-    case 1:
-        cpu.registers.C = cpu_res_bit(cpu.registers.C, bit); break;
-    case 2:
-        cpu.registers.D = cpu_res_bit(cpu.registers.D, bit); break;
-    case 3:
-        cpu.registers.E = cpu_res_bit(cpu.registers.E, bit); break;
-    case 4:
-        cpu.registers.H = cpu_res_bit(cpu.registers.H, bit); break;
-    case 5:
-        cpu.registers.L = cpu_res_bit(cpu.registers.L, bit); break;
-    case 6: {
-        uint8_t value = cpu_read8(cpu.registers.HL);
-        value = cpu_res_bit(value, bit);
-        cpu_write8(cpu.registers.HL, value);
-        break;
-    }
-    case 7:
-        cpu.registers.A = cpu_res_bit(cpu.registers.A, bit); break;
+    switch (reg)
+    {
+        case 0:
+            cpu.registers.B = cpu_res_bit(cpu.registers.B, bit); break;
+        case 1:
+            cpu.registers.C = cpu_res_bit(cpu.registers.C, bit); break;
+        case 2:
+            cpu.registers.D = cpu_res_bit(cpu.registers.D, bit); break;
+        case 3:
+            cpu.registers.E = cpu_res_bit(cpu.registers.E, bit); break;
+        case 4:
+            cpu.registers.H = cpu_res_bit(cpu.registers.H, bit); break;
+        case 5:
+            cpu.registers.L = cpu_res_bit(cpu.registers.L, bit); break;
+        case 6: {
+            uint8_t value = cpu_read8(cpu.registers.HL);
+            value = cpu_res_bit(value, bit);
+            cpu_write8(cpu.registers.HL, value);
+            break;
+        }
+        case 7:
+            cpu.registers.A = cpu_res_bit(cpu.registers.A, bit); break;
     }
 }
 
@@ -629,9 +798,9 @@ static inline void cpu_jr_cond(bool_t condition)
     }
 }
 
+// NOP
 static void op_00() 
 { 
-    // NOP 
 } 
 
 // LD BC, $#### 
@@ -644,8 +813,7 @@ static void op_01()
 
 static void op_02() 
 { 
-    uint16_t address = bus_read8(cpu.registers.BC); 
-    bus_write8(address, cpu.registers.A); 
+    bus_write8(cpu.registers.BC, cpu.registers.A);
 } 
 
 static void op_03() 
@@ -685,7 +853,8 @@ static void op_08()
     uint8_t lo = cpu_fetch8(); 
     uint8_t hi = cpu_fetch8(); 
     uint16_t address = (hi << 8) | lo; 
-    bus_write8(address, cpu.registers.SP); 
+    bus_write8(address, cpu.registers.SP & 0xFF);
+    bus_write8(address + 1, (cpu.registers.SP >> 8) & 0xFF);
 } 
 
 static void op_09() 
@@ -731,10 +900,11 @@ static void op_0F()
     cpu.registers.F = carry ? FLAG_C : 0; 
 } 
 
-// TBD 
 static void op_10() 
 { 
-    assert(0);
+    cpu.registers.PC++; /* skip STOP padding byte */
+    cpu.stopped = 1;
+    cpu.halted = 0;
 } 
 
 static void op_11() 
@@ -746,8 +916,7 @@ static void op_11()
 
 static void op_12() 
 { 
-    uint16_t address = bus_read8(cpu.registers.DE); 
-    bus_write8(address, cpu.registers.A); 
+    bus_write8(cpu.registers.DE, cpu.registers.A);
 } 
 
 static void op_13() 
@@ -896,9 +1065,12 @@ void op_27()
     else { 
         /* After ADD/ADC */ 
         if ((cpu.registers.F & FLAG_H) || (a & 0x0F) > 0x09) 
+        {
             adjust |= 0x06; 
+        }
 
-        if (carry || a > 0x99) { 
+        if (carry || a > 0x99)
+        { 
             adjust |= 0x60; 
             carry = 1; 
         } 
@@ -964,8 +1136,8 @@ static void op_2E()
 
 static void op_2F()
 {
-    assert(0);
-
+    cpu.registers.A ^= 0xFF;
+    cpu.registers.F = (cpu.registers.F & (FLAG_Z | FLAG_C)) | FLAG_N | FLAG_H;
 }
 
 /* 30: JR NC,n */
@@ -1003,13 +1175,14 @@ static void op_34()
 static void op_35() 
 { 
     uint8_t value = bus_read8(cpu.registers.HL); 
+    value = cpu_dec8(value);
     bus_write8(cpu.registers.HL, value); 
 } 
 
 static void op_36()
 {
-    assert(0);
-
+    uint8_t value = cpu_fetch8();
+    bus_write8(cpu.registers.HL, value);
 }
 
 static void op_37() 
@@ -1149,8 +1322,7 @@ static void op_4E()
 
 static void op_4F()
 {
-
-    assert(0);
+    cpu.registers.C = cpu.registers.A;
 }
 
 static void op_50() 
@@ -1345,14 +1517,13 @@ static void op_75()
 
 static void op_76() 
 { 
-    // TBD 
-    assert(0);
+    cpu.halted = 1;
+    cpu.stopped = 0;
 } 
 
 static void op_77() 
 { 
-    uint16_t address = bus_read8(cpu.registers.HL); 
-    bus_write8(address, cpu.registers.A); 
+    bus_write8(cpu.registers.HL, cpu.registers.A);
 } 
 
 static void op_78() 
@@ -1720,20 +1891,18 @@ static void op_BE()
 
 static void op_BF()
 {
-    assert(0);
-
+    cpu_cp8(cpu.registers.A);
 }
 
 static void op_C0()
 {
-    assert(0);
-
+    cpu_ret_cond(!(cpu.registers.F & FLAG_Z));
 }
 
 static void op_C1()
 {
-    assert(0);
-
+    cpu.registers.C = cpu_pop8();
+    cpu.registers.B = cpu_pop8();
 }
 
 /* C2: JP NZ,nn */
@@ -1756,8 +1925,8 @@ void op_C3()
 
 static void op_C4()
 {
-    assert(0);
-
+    uint16_t addr = cpu_fetch16();
+    cpu_call_cond(!(cpu.registers.F & FLAG_Z), addr);
 }
 
 static void op_C5() 
@@ -1784,14 +1953,12 @@ static void op_C7()
 
 static void op_C8()
 {
-    assert(0);
-
+    cpu_ret_cond(cpu.registers.F & FLAG_Z);
 }
 
 static void op_C9()
 {
-    assert(0);
-
+    cpu_ret();
 }
 
 /* CA: JP Z,nn */
@@ -2063,24 +2230,14 @@ static void op_CB()
 
 static void op_CC()
 {
-    assert(0);
+    uint16_t addr = cpu_fetch16();
+    cpu_call_cond(cpu.registers.F & FLAG_Z, addr);
 }
 
 void op_CD()
 {
     uint16_t addr = cpu_fetch16();
-
-    /* Internal M-cycle */
-    cpu_idle();
-
-    /* Push return address: high byte first, then low byte */
-    cpu.registers.SP--;
-    cpu_write8(cpu.registers.SP, (cpu.registers.PC >> 8) & 0xFF);
-
-    cpu.registers.SP--;
-    cpu_write8(cpu.registers.SP, cpu.registers.PC & 0xFF);
-
-    cpu.registers.PC = addr;
+    cpu_call(addr);
 }
 
 static void op_CE()
@@ -2096,8 +2253,7 @@ static void op_CF()
 
 static void op_D0()
 {
-    assert(0);
-
+    cpu_ret_cond(!(cpu.registers.F & FLAG_C));
 }
 
 static void op_D1()
@@ -2122,8 +2278,8 @@ static void op_D3()
 
 static void op_D4()
 {
-    assert(0);
-
+    uint16_t addr = cpu_fetch16();
+    cpu_call_cond(!(cpu.registers.F & FLAG_C), addr);
 }
 
 static void op_D5()
@@ -2145,14 +2301,15 @@ static void op_D7()
 
 static void op_D8()
 {
-    assert(0);
-
+    cpu_ret_cond(cpu.registers.F & FLAG_C);
 }
 
 static void op_D9()
 {
-    assert(0);
-
+    cpu_ret();
+    cpu.ime = 1;
+    cpu.ime_pending = 0;
+    cpu.ime_delay = 0;
 }
 
 /* DA: JP C,nn */
@@ -2169,8 +2326,8 @@ static void op_DB()
 
 static void op_DC()
 {
-    assert(0);
-
+    uint16_t addr = cpu_fetch16();
+    cpu_call_cond(cpu.registers.F & FLAG_C, addr);
 }
 
 static void op_DD()
@@ -2349,6 +2506,7 @@ static void op_F6()
     cpu_or8(value);
 }
 
+// RST 0x30
 static void op_F7()
 {
     cpu_rst(0x0030);
@@ -2367,8 +2525,8 @@ static void op_F8()
 
 static void op_F9()
 {
-    assert(0);
-
+    cpu_idle();
+    cpu.registers.SP = cpu.registers.HL;
 }
 
 static void op_FA()

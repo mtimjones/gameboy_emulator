@@ -2,3 +2,9 @@
 void memory_init();
 unsigned char bus_read8(unsigned short address);
 void bus_write8(unsigned short address, unsigned char value);
+void timer_tick(unsigned int cycles);
+unsigned char interrupt_flags_read(void);
+void interrupt_flags_write(unsigned char value);
+unsigned char interrupt_enable_read(void);
+void interrupt_enable_write(unsigned char value);
+void interrupt_request(unsigned char mask);

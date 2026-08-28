@@ -1,6 +1,7 @@
 // memory.c
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include "cpu.h"
 #include "input.h"
 #include "common.h"
@@ -70,6 +71,21 @@ void memory_init(void)
     timer.tma = 0;
     timer.tac = 0;
     timer.reload_delay = 0;
+}
+
+bool_t memory_load_cartridge(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+
+    if (!fp)
+        return false;
+
+    memset(memory, 0xFF, 0x8000);
+
+    fread(memory, 1, 0x8000, fp);
+    fclose(fp);
+
+    return true;
 }
 
 unsigned char memory_peek8(unsigned short address)
